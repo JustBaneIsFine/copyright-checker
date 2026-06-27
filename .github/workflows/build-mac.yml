@@ -1,0 +1,56 @@
+name: Build macOS app
+
+# Builds a ready-to-run macOS .app on a real (cloud) Mac and uploads it as a
+# downloadable artifact. Run it from the repo's Actions tab (Run workflow), or it
+# runs automatically on every push to main.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build-mac:
+    # macos-13 is Intel (x86_64). An x86_64 app runs on Intel Macs natively and on
+    # Apple Silicon via Rosetta, so it works for the widest range of testers.
+    runs-on: macos-13
+
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Bundle a macOS ffmpeg
+        run: |
+          brew install ffmpeg
+          mkdir -p bin
+          cp "$(which ffmpeg)" bin/ffmpeg
+          chmod +x bin/ffmpeg
+
+      - name: Install build dependencies
+        run: pip install flask pywebview pyinstaller
+
+      - name: Build the app
+        run: |
+          pyinstaller --windowed --clean --noconfirm \
+            --name "DJ Copyright Prep" \
+            --icon icon.icns \
+            --add-data "bin:bin" \
+            --collect-all webview \
+            --exclude-module tkinter \
+            app.py
+
+      - name: Zip the app
+        run: |
+          cd dist
+          zip -q -r -y DJCopyrightPrep_mac.zip "DJ Copyright Prep.app"
+
+      - name: Upload the macOS app
+        uses: actions/upload-artifact@v4
+        with:
+          name: DJCopyrightPrep_mac
+          path: dist/DJCopyrightPrep_mac.zip

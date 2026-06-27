@@ -1,0 +1,26 @@
+# Build outputs
+dist/
+build/
+*.spec
+build_out.txt
+
+# Python
+__pycache__/
+*.pyc
+
+# Large binaries (the macOS CI build fetches its own ffmpeg via brew; the Windows
+# ffmpeg/WebView2 installer live on your machine and are not needed in the repo)
+bin/
+redist/
+mac_kit/
+
+# Downloaded archives + zips
+*.zip
+ff.zip
+ffmac.zip
+icon_preview.png
+
+# Old standalone .bat scripts kept only for reference
+Copyright song merger/
+Copyright video generator/
+frontend/
