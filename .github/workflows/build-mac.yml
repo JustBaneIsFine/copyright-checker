@@ -11,9 +11,10 @@ on:
 
 jobs:
   build-mac:
-    # macos-13 is Intel (x86_64). An x86_64 app runs on Intel Macs natively and on
-    # Apple Silicon via Rosetta, so it works for the widest range of testers.
-    runs-on: macos-13
+    # macos-14 = Apple Silicon (arm64) runners, which get picked up quickly (the Intel
+    # macos-13 queue can be very long). This builds a NATIVE Apple-Silicon app - it runs
+    # on M1/M2/M3/M4 Macs (the vast majority today) but NOT on older Intel Macs.
+    runs-on: macos-14
 
     steps:
       - name: Check out the code
