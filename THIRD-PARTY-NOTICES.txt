@@ -1,0 +1,19 @@
+Third-party software included in DJ Copyright Prep
+==================================================
+
+FFmpeg
+------
+This application bundles FFmpeg (https://ffmpeg.org) to read, trim and combine
+audio. The included FFmpeg build is licensed under the GNU General Public
+License version 3 (GPLv3), because it is built with GPL components such as
+libx264.
+
+  License: GPLv3 - https://www.gnu.org/licenses/gpl-3.0.html
+  Project: https://ffmpeg.org
+  Source of the exact builds used:
+    Windows: https://www.gyan.dev/ffmpeg/builds/
+    macOS:   https://evermeet.cx/ffmpeg/  (and https://ffmpeg.org/download.html)
+
+FFmpeg is a separate program that this application runs; it is not linked into
+the application's own code. The application's own source code is provided under
+the MIT License (see LICENSE).

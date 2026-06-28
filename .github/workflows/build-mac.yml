@@ -38,7 +38,9 @@ jobs:
           pyinstaller --windowed --clean --noconfirm --name "DJ Copyright Prep" \
             --icon icon.icns --add-data "bin:bin" --collect-all webview \
             --exclude-module tkinter app.py
-      - run: cd dist && zip -q -r -y "DJCopyrightPrep_mac_apple-silicon.zip" "DJ Copyright Prep.app"
+      - run: |
+          cp THIRD-PARTY-NOTICES.txt LICENSE dist/
+          cd dist && zip -q -r -y "DJCopyrightPrep_mac_apple-silicon.zip" "DJ Copyright Prep.app" THIRD-PARTY-NOTICES.txt LICENSE
       - uses: actions/upload-artifact@v4
         with:
           name: DJCopyrightPrep_mac_apple-silicon
@@ -70,7 +72,10 @@ jobs:
         run: pyinstaller --onedir --noconsole --clean --noconfirm --name DJCopyrightPrep --icon icon.ico --add-data "bin;bin" --add-data "redist;redist" --collect-all webview --collect-all pythonnet --collect-all clr_loader --copy-metadata pythonnet --exclude-module tkinter app.py
       - name: Zip
         shell: pwsh
-        run: Compress-Archive -Path "dist/DJCopyrightPrep" -DestinationPath "dist/DJCopyrightPrep_windows.zip"
+        run: |
+          Copy-Item THIRD-PARTY-NOTICES.txt dist/DJCopyrightPrep/
+          Copy-Item LICENSE dist/DJCopyrightPrep/LICENSE.txt
+          Compress-Archive -Path "dist/DJCopyrightPrep" -DestinationPath "dist/DJCopyrightPrep_windows.zip"
       - uses: actions/upload-artifact@v4
         with:
           name: DJCopyrightPrep_windows
