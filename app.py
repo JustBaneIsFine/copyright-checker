@@ -46,7 +46,7 @@ def _bin(name):
 
 FFMPEG = _bin("ffmpeg")
 
-AUDIO_EXTS = (".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".wma")
+AUDIO_EXTS = (".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".wma", ".aiff", ".aif")
 
 app = Flask(__name__)
 # Keep the embedded server quiet - there is no console to print to in the shipped app.
@@ -57,7 +57,7 @@ WINDOW = None
 
 # Bumped each release to match the GitHub tag (e.g. tag v1.2.0 -> APP_VERSION "1.2.0").
 # The app compares this to the latest release to offer an in-app update notice.
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 GITHUB_REPO = "JustBaneIsFine/copyright-checker"
 
 # Hide the console windows ffmpeg/ffprobe would otherwise pop up on Windows.

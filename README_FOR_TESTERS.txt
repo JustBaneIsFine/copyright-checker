@@ -20,7 +20,7 @@ How to run (Windows)
 
 3. In the window:
    - Click "Choose folder" and select a folder containing your songs
-     (.mp3 .wav .flac .m4a .aac .ogg).
+     (.mp3 .wav .flac .m4a .aac .ogg .aiff).
    - Pick options:
        * Output:  "Video + Audio"  -> a tiny .mp4 (upload this to YouTube)
                   "Audio only"      -> just the combined .wav audio file

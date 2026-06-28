@@ -1,6 +1,7 @@
-## Version 1.1.0
+## Version 1.2.0
 
 New
-- The app now checks for updates when it opens and shows you what changed, with a one-click download. You no longer have to keep re-downloading by hand to find out if there is a newer version.
+- Added support for AIFF (.aiff / .aif) audio files.
+- The app checks for updates when it opens and shows what's new, with a one-click download, so you no longer have to re-download by hand to find out if there is a newer version.
 
 When an update is available you will see a bar at the top: click "What's new" to read the changes, then "Download" to get it.
