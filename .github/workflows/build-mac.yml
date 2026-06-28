@@ -4,9 +4,9 @@ name: Build and release
 # Tag v* : same, then publishes a GitHub Release with the zips attached (permanent
 #          public download links + per-file download counts).
 #
-# The release waits only on Windows + Apple Silicon, so the scarce Intel runners can
-# never block a release. The Intel app is best-effort and gets folded in whenever its
-# runner is available.
+# Targets: Windows (x86_64) and macOS Apple Silicon (arm64). GitHub retired its free
+# Intel macOS runners, so Intel Macs are no longer built here. Apple Silicon covers all
+# Macs from late 2020 on.
 
 on:
   push:
@@ -78,7 +78,7 @@ jobs:
 
   release:
     name: publish-release
-    needs: [build-mac-arm, build-windows]   # NOT build-mac-intel, so Intel can't block
+    needs: [build-mac-arm, build-windows]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
