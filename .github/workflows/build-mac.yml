@@ -44,31 +44,6 @@ jobs:
           name: DJCopyrightPrep_mac_apple-silicon
           path: dist/DJCopyrightPrep_mac_apple-silicon.zip
 
-  build-mac-intel:
-    name: build-mac-intel
-    if: startsWith(github.ref, 'refs/tags/v')   # only for releases, not every push
-    runs-on: macos-13            # Intel (x86_64); runners can be slow to allocate
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Bundle a macOS ffmpeg
-        run: |
-          brew install ffmpeg
-          mkdir -p bin && cp "$(which ffmpeg)" bin/ffmpeg && chmod +x bin/ffmpeg
-      - run: pip install flask pywebview pyinstaller
-      - name: Build
-        run: |
-          pyinstaller --windowed --clean --noconfirm --name "DJ Copyright Prep" \
-            --icon icon.icns --add-data "bin:bin" --collect-all webview \
-            --exclude-module tkinter app.py
-      - run: cd dist && zip -q -r -y "DJCopyrightPrep_mac_intel.zip" "DJ Copyright Prep.app"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: DJCopyrightPrep_mac_intel
-          path: dist/DJCopyrightPrep_mac_intel.zip
-
   build-windows:
     name: build-windows
     runs-on: windows-latest

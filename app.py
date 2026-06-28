@@ -305,11 +305,10 @@ def _version_gt(a, b):
 
 
 def _update_asset():
-    """The release zip filename for the machine we're running on."""
+    """The release zip filename for the machine we're running on. (Only Apple Silicon
+    Macs are built now - GitHub retired the free Intel macOS runners.)"""
     if sys.platform == "darwin":
-        import platform as _pf
-        return ("DJCopyrightPrep_mac_intel.zip" if _pf.machine() == "x86_64"
-                else "DJCopyrightPrep_mac_apple-silicon.zip")
+        return "DJCopyrightPrep_mac_apple-silicon.zip"
     return "DJCopyrightPrep_windows.zip"
 
 
