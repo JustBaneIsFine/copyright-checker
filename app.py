@@ -59,6 +59,8 @@ WINDOW = None
 # The current batch of tracks to combine: a list of absolute file paths (some are real
 # source files from the picker, some are dropped files we staged to a temp dir).
 BATCH = []
+SEEN = set()            # de-dupe keys (lowercased name, size) already in the batch
+BATCH_LOCK = threading.Lock()   # guards BATCH/SEEN against overlapping add requests
 STAGING = None          # temp dir holding dropped files
 OUT_DIR = None          # where to write the result (a picked folder, else the Desktop)
 OUT_BASE = ""           # optional prefix for the output file (e.g. a folder's name)
@@ -150,6 +152,33 @@ def _ensure_staging():
 
 def _batch_payload():
     return {"files": [os.path.basename(p) for p in BATCH], "count": len(BATCH)}
+
+
+def _batch_key(path):
+    """Identity used to catch duplicates: same filename + same byte size."""
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        size = -1
+    return (os.path.basename(path).lower(), size)
+
+
+def _add_path(path):
+    """Append a track if it isn't already in the batch. Returns True if added.
+    Holds BATCH_LOCK so overlapping drops/picks can't double-add or race."""
+    with BATCH_LOCK:
+        key = _batch_key(path)
+        if key in SEEN:
+            return False
+        BATCH.append(path)
+        SEEN.add(key)
+        return True
+
+
+def _rebuild_seen():
+    with BATCH_LOCK:
+        SEEN.clear()
+        SEEN.update(_batch_key(p) for p in BATCH)
 
 
 def _open_folder_dialog():
@@ -306,56 +335,77 @@ def batch_get():
 def batch_add_folder():
     folder = _open_folder_dialog()
     if not folder:
-        return jsonify({"cancelled": True, **_batch_payload()})
+        return jsonify({"cancelled": True, "added": 0, "skipped": 0, **_batch_payload()})
     global OUT_DIR, OUT_BASE
     was_empty = not BATCH
-    added = 0
+    added = skipped = 0
     for n in list_audio(folder):
-        p = os.path.join(folder, n)
-        if p not in BATCH:
-            BATCH.append(p)
+        if _add_path(os.path.join(folder, n)):
             added += 1
+        else:
+            skipped += 1
     # If this folder is the whole batch, write the result next to it and name it after it.
-    if was_empty and added == len(BATCH):
+    if was_empty and added == len(BATCH) and added:
         OUT_DIR = folder
         OUT_BASE = os.path.basename(os.path.normpath(folder)) or ""
     else:
         OUT_DIR = OUT_DIR or _desktop_dir()
-    return jsonify({"added": added, **_batch_payload()})
+    return jsonify({"added": added, "skipped": skipped, **_batch_payload()})
 
 
 @app.route("/batch/add-files", methods=["POST"])
 def batch_add_files():
     global OUT_DIR
-    added = 0
+    added = skipped = 0
     for p in _open_files_dialog():
-        if is_audio(p) and p not in BATCH:
-            BATCH.append(p)
+        if not is_audio(p):
+            continue
+        if _add_path(p):
             added += 1
+        else:
+            skipped += 1
     if OUT_DIR is None:
         OUT_DIR = _desktop_dir()
-    return jsonify({"added": added, **_batch_payload()})
+    return jsonify({"added": added, "skipped": skipped, **_batch_payload()})
 
 
 @app.route("/batch/add-file", methods=["POST"])
 def batch_add_file():
-    """A dropped file, uploaded as multipart (the WebView hides the real path)."""
+    """A dropped file, uploaded as multipart (the WebView hides the real path).
+    Returns status added | duplicate | ignored so the page can tally drops."""
     global OUT_DIR
     f = request.files.get("file")
-    if f and is_audio(f.filename or ""):
-        staging = _ensure_staging()
-        name = os.path.basename((f.filename or "track").replace("\\", "/"))
-        dest = os.path.join(staging, name)
-        base, ext = os.path.splitext(name)
-        k = 1
-        while os.path.exists(dest):
-            dest = os.path.join(staging, f"{base}_{k}{ext}")
-            k += 1
-        f.save(dest)
-        BATCH.append(dest)
-        if OUT_DIR is None:
-            OUT_DIR = _desktop_dir()
-    return jsonify(_batch_payload())
+    if not f or not is_audio(f.filename or ""):
+        return jsonify({"status": "ignored", **_batch_payload()})
+
+    staging = _ensure_staging()
+    name = os.path.basename((f.filename or "track").replace("\\", "/"))
+    base, ext = os.path.splitext(name)
+    dest = os.path.join(staging, name)
+    k = 1
+    while os.path.exists(dest):          # avoid clobbering a same-named file on disk
+        dest = os.path.join(staging, f"{base}_{k}{ext}")
+        k += 1
+    f.save(dest)
+
+    # Dedupe by (original name, size); _add_path uses the saved file's basename, so key
+    # on the original name explicitly to catch the same track dropped twice.
+    with BATCH_LOCK:
+        key = (name.lower(), os.path.getsize(dest))
+        if key in SEEN:
+            status = "duplicate"
+        else:
+            BATCH.append(dest)
+            SEEN.add(key)
+            status = "added"
+    if status == "duplicate":
+        try:
+            os.remove(dest)
+        except OSError:
+            pass
+    if OUT_DIR is None:
+        OUT_DIR = _desktop_dir()
+    return jsonify({"status": status, **_batch_payload()})
 
 
 @app.route("/batch/base", methods=["POST"])
@@ -372,25 +422,29 @@ def batch_base():
 @app.route("/batch/remove", methods=["POST"])
 def batch_remove():
     i = (request.json or {}).get("index", -1)
-    if isinstance(i, int) and 0 <= i < len(BATCH):
-        p = BATCH.pop(i)
-        if STAGING and os.path.abspath(p).startswith(os.path.abspath(STAGING)):
-            try:
-                os.remove(p)
-            except OSError:
-                pass
+    with BATCH_LOCK:
+        if isinstance(i, int) and 0 <= i < len(BATCH):
+            p = BATCH.pop(i)
+            if STAGING and os.path.abspath(p).startswith(os.path.abspath(STAGING)):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+    _rebuild_seen()
     return jsonify(_batch_payload())
 
 
 @app.route("/batch/clear", methods=["POST"])
 def batch_clear():
     global BATCH, STAGING, OUT_DIR, OUT_BASE
-    BATCH = []
-    if STAGING and os.path.isdir(STAGING):
-        shutil.rmtree(STAGING, ignore_errors=True)
-    STAGING = None
-    OUT_DIR = None
-    OUT_BASE = ""
+    with BATCH_LOCK:
+        BATCH = []
+        SEEN.clear()
+        if STAGING and os.path.isdir(STAGING):
+            shutil.rmtree(STAGING, ignore_errors=True)
+        STAGING = None
+        OUT_DIR = None
+        OUT_BASE = ""
     return jsonify(_batch_payload())
 
 
@@ -537,6 +591,9 @@ body.dragging .drop-hint{color:var(--accent)}
 .file .fn{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .file .rm{cursor:pointer;color:var(--text-dim);padding:0 4px;flex:none}
 .file .rm:hover{color:var(--danger)}
+body.busy .drop{opacity:.55}
+body.busy .drop-btns button{cursor:default}
+body.busy .file .rm{pointer-events:none;opacity:.35}
 .row{display:flex;align-items:center;gap:10px;margin-bottom:10px}
 .row label{flex:1;color:var(--text)}
 .row .num{width:90px}
@@ -711,6 +768,18 @@ function setMode(m){
 }
 
 // --- Batch building (drag-drop + pickers) ---
+// uploadQueue holds dropped files waiting to be sent; one drain loop processes them so
+// overlapping drops (drop 50, then 50 more mid-upload) just extend the same queue.
+let uploadQueue = [], uploading = false, generating = false;
+let addTally = 0, dupTally = 0, errTally = 0;
+
+function isBusy(){ return uploading || generating; }
+function setBusy(){
+  const busy = isBusy();
+  document.querySelectorAll('#drop .drop-btns button').forEach(b => b.disabled = busy);
+  document.getElementById('go').disabled = busy || batchCount === 0;
+  document.body.classList.toggle('busy', busy);
+}
 function renderBatch(d){
   batchCount = d.count;
   const fl = document.getElementById('files');
@@ -721,27 +790,43 @@ function renderBatch(d){
   document.getElementById('batchhead').classList.toggle('show', d.count>0);
   document.getElementById('batchcount').textContent = d.count;
   document.getElementById('batchword').textContent = d.count===1 ? 'track' : 'tracks';
-  document.getElementById('go').disabled = d.count===0;
+  setBusy();
 }
 async function refreshBatch(){ renderBatch(await (await fetch('/batch')).json()); }
 function setBatchStatus(s){ document.getElementById('batchstatus').textContent = s || ''; }
+function summarise(){
+  let parts = [];
+  if(addTally) parts.push('Added ' + addTally);
+  if(dupTally) parts.push('skipped ' + dupTally + ' duplicate' + (dupTally>1?'s':''));
+  if(errTally) parts.push(errTally + ' failed');
+  return parts.length ? parts.join(', ') + '.' : '';
+}
 
 async function addFolder(){
+  if(isBusy()) return;
   setBatchStatus('Opening…');
   const d = await (await fetch('/batch/add-folder', {method:'POST'})).json();
-  setBatchStatus(d.added===0 && !d.cancelled ? 'No audio files in that folder.' : '');
   renderBatch(d);
+  setBatchStatus(d.cancelled ? '' :
+    (d.added===0 && d.skipped===0 ? 'No audio files in that folder.'
+     : 'Added ' + d.added + (d.skipped?(', skipped ' + d.skipped + ' duplicate' + (d.skipped>1?'s':'')):'') + '.'));
 }
 async function addFiles(){
+  if(isBusy()) return;
   setBatchStatus('Opening…');
   const d = await (await fetch('/batch/add-files', {method:'POST'})).json();
-  setBatchStatus(''); renderBatch(d);
+  renderBatch(d);
+  setBatchStatus(d.added===0 && d.skipped===0 ? '' :
+    'Added ' + d.added + (d.skipped?(', skipped ' + d.skipped + ' duplicate' + (d.skipped>1?'s':'')):'') + '.');
 }
 async function removeItem(i){
+  if(isBusy()) return;
   renderBatch(await (await fetch('/batch/remove', {method:'POST',
     headers:{'Content-Type':'application/json'}, body: JSON.stringify({index:i})})).json());
 }
 async function clearBatch(){
+  if(isBusy()) return;
+  setBatchStatus('');
   renderBatch(await (await fetch('/batch/clear', {method:'POST'})).json());
 }
 
@@ -764,31 +849,48 @@ async function collectFiles(entry, out){
     for(const e of await readEntries(entry.createReader())) await collectFiles(e, out);
   }
 }
-async function uploadDrop(file){
-  const fd = new FormData(); fd.append('file', file, file.name);
-  await fetch('/batch/add-file', {method:'POST', body: fd});
+function enqueueUploads(files){
+  for(const f of files) uploadQueue.push(f);
+  if(!uploading) drainQueue();
+}
+async function drainQueue(){
+  uploading = true; addTally = dupTally = errTally = 0; setBusy();
+  let done = 0;
+  while(uploadQueue.length){
+    const file = uploadQueue.shift();
+    done++;
+    setBatchStatus('Adding ' + done + ' / ' + (done + uploadQueue.length) + '…');
+    try{
+      const fd = new FormData(); fd.append('file', file, file.name);
+      const r = await (await fetch('/batch/add-file', {method:'POST', body: fd})).json();
+      if(r.status === 'added') addTally++; else if(r.status === 'duplicate') dupTally++;
+      renderBatch(r);                 // grow the list live
+    }catch(_){ errTally++; }
+  }
+  uploading = false; setBusy();
+  setBatchStatus(summarise());
 }
 async function handleDrop(e){
+  if(generating){ setBatchStatus('Please wait for the current export to finish.'); return; }
   const items = e.dataTransfer.items, entries = [];
   let folderName = '';
   for(const it of items){
     const en = it.webkitGetAsEntry && it.webkitGetAsEntry();
     if(en){ entries.push(en); if(en.isDirectory && !folderName) folderName = en.name; }
   }
-  setBatchStatus('Reading dropped items…');
+  if(!uploading) setBatchStatus('Reading dropped items…');
   const files = [];
   if(entries.length){ for(const en of entries) await collectFiles(en, files); }
   else if(e.dataTransfer.files){ for(const f of e.dataTransfer.files) if(isAudioName(f.name)) files.push(f); }
-  if(!files.length){ setBatchStatus('No audio files in what you dropped.'); return; }
+  if(!files.length){ if(!uploading) setBatchStatus('No audio files in what you dropped.'); return; }
   if(folderName) fetch('/batch/base', {method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({name: folderName})});
-  let n = 0;
-  for(const f of files){ n++; setBatchStatus('Adding ' + n + ' / ' + files.length + '…'); await uploadDrop(f); }
-  setBatchStatus(''); await refreshBatch();
+  enqueueUploads(files);
 }
 let dragDepth = 0;
 window.addEventListener('dragover', e => e.preventDefault());
-window.addEventListener('dragenter', e => { e.preventDefault(); dragDepth++; document.body.classList.add('dragging'); });
+window.addEventListener('dragenter', e => { e.preventDefault(); dragDepth++;
+  if(!generating) document.body.classList.add('dragging'); });
 window.addEventListener('dragleave', e => { if(--dragDepth<=0){ dragDepth=0; document.body.classList.remove('dragging'); } });
 window.addEventListener('drop', async e => {
   e.preventDefault(); dragDepth=0; document.body.classList.remove('dragging');
@@ -796,7 +898,8 @@ window.addEventListener('drop', async e => {
 });
 
 function go(){
-  if(batchCount===0) return;
+  if(batchCount===0 || isBusy()) return;
+  generating = true; setBusy();
   const trim = document.getElementById('trim').checked;
   const q = new URLSearchParams({
     trim: trim,
@@ -805,7 +908,6 @@ function go(){
     bitrate: document.getElementById('bitrate').value,
     audio_only: (outputMode === 'audio'),
   });
-  document.getElementById('go').disabled = true;
   document.getElementById('result').classList.remove('show','err');
   document.getElementById('progwrap').classList.remove('hidden');
   setBar(0); setStatus('Starting…');
@@ -837,7 +939,7 @@ function go(){
 
 function finish(msg, isErr){
   setBar(100);
-  document.getElementById('go').disabled = (batchCount===0);
+  generating = false; setBusy();
   const res = document.getElementById('result');
   res.classList.add('show'); res.classList.toggle('err', isErr);
   document.getElementById('resmsg').innerHTML = msg;
