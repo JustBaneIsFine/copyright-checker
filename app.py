@@ -14,6 +14,7 @@ import os
 import re
 import sys
 import json
+import time
 import socket
 import shutil
 import logging
@@ -567,6 +568,20 @@ def _serve(port):
     app.run(host="127.0.0.1", port=port, threaded=True)
 
 
+def _wait_for_server(port, timeout=15.0):
+    """Block until the local server responds, so the window never loads before the
+    page is being served. Returns True if it came up, False on timeout."""
+    import urllib.request
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=0.5)
+            return True
+        except Exception:
+            time.sleep(0.1)
+    return False
+
+
 def log_path():
     """Path to the error/crash log the user can send us. Kept stable across runs."""
     base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
@@ -662,6 +677,12 @@ def main():
     log.info("webview2 present=%s; launching server + window", _webview2_present())
 
     threading.Thread(target=_serve, args=(port,), daemon=True).start()
+    # Wait until the local server actually answers before opening the window. Without
+    # this, the WebView can navigate to the URL before Flask is listening and just show
+    # a blank page (it does not auto-retry). This is the usual "blank window" cause.
+    ready = _wait_for_server(port)
+    log.info("server ready=%s", ready)
+
     win_w, win_h = 600, 748
     pos = _center_pos(win_w, win_h)
     global WINDOW
