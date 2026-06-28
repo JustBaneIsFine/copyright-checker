@@ -1,8 +1,9 @@
-name: Build macOS app
+name: Build macOS apps
 
-# Builds a ready-to-run macOS .app on a real (cloud) Mac and uploads it as a
-# downloadable artifact. Run it from the repo's Actions tab (Run workflow), or it
-# runs automatically on every push to main.
+# Builds BOTH macOS variants on every push (and on-demand), each as its own download:
+#   * Intel (x86_64)        -> runs on Intel Macs natively AND Apple Silicon via Rosetta
+#   * Apple Silicon (arm64) -> native on M1/M2/M3/M4 Macs (faster there)
+# Grab whichever matches your tester from the run's Artifacts section.
 
 on:
   workflow_dispatch:
@@ -11,10 +12,16 @@ on:
 
 jobs:
   build-mac:
-    # macos-14 = Apple Silicon (arm64) runners, which get picked up quickly (the Intel
-    # macos-13 queue can be very long). This builds a NATIVE Apple-Silicon app - it runs
-    # on M1/M2/M3/M4 Macs (the vast majority today) but NOT on older Intel Macs.
-    runs-on: macos-14
+    name: build-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false   # if the Intel runner queue is slow, don't hold up Apple Silicon
+      matrix:
+        include:
+          - runner: macos-13   # Intel (x86_64)
+            arch: intel
+          - runner: macos-14   # Apple Silicon (arm64)
+            arch: apple-silicon
 
     steps:
       - name: Check out the code
@@ -25,7 +32,7 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Bundle a macOS ffmpeg
+      - name: Bundle a macOS ffmpeg (matches the runner's architecture)
         run: |
           brew install ffmpeg
           mkdir -p bin
@@ -48,10 +55,10 @@ jobs:
       - name: Zip the app
         run: |
           cd dist
-          zip -q -r -y DJCopyrightPrep_mac.zip "DJ Copyright Prep.app"
+          zip -q -r -y "DJCopyrightPrep_mac_${{ matrix.arch }}.zip" "DJ Copyright Prep.app"
 
       - name: Upload the macOS app
         uses: actions/upload-artifact@v4
         with:
-          name: DJCopyrightPrep_mac
-          path: dist/DJCopyrightPrep_mac.zip
+          name: DJCopyrightPrep_mac_${{ matrix.arch }}
+          path: dist/DJCopyrightPrep_mac_${{ matrix.arch }}.zip
