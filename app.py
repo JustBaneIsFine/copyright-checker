@@ -55,6 +55,11 @@ logging.getLogger("werkzeug").setLevel(logging.ERROR)
 # Set once the native window exists; lets the /pick-folder route use the OS-native dialog.
 WINDOW = None
 
+# Bumped each release to match the GitHub tag (e.g. tag v1.2.0 -> APP_VERSION "1.2.0").
+# The app compares this to the latest release to offer an in-app update notice.
+APP_VERSION = "1.1.0"
+GITHUB_REPO = "JustBaneIsFine/copyright-checker"
+
 # Hide the console windows ffmpeg/ffprobe would otherwise pop up on Windows.
 _NOWINDOW = 0x08000000 if os.name == "nt" else 0
 
@@ -223,7 +228,7 @@ def process(folder, trim, offset, length, bitrate, color, audio_only=False):
 # --------------------------------------------------------------------------------------
 @app.route("/")
 def index():
-    return Response(PAGE, mimetype="text/html")
+    return Response(PAGE.replace("__VERSION__", APP_VERSION), mimetype="text/html")
 
 
 @app.route("/pick-folder", methods=["POST"])
@@ -281,6 +286,69 @@ def process_route():
 @app.route("/open-folder", methods=["POST"])
 def open_folder():
     reveal(request.json.get("path", ""))
+    return jsonify({"ok": True})
+
+
+def _version_gt(a, b):
+    """True if version string a is newer than b (e.g. '1.2.0' > '1.1.5')."""
+    def parts(v):
+        out = []
+        for p in str(v).split("."):
+            digits = "".join(c for c in p if c.isdigit())
+            out.append(int(digits) if digits else 0)
+        return out
+    pa, pb = parts(a), parts(b)
+    n = max(len(pa), len(pb))
+    pa += [0] * (n - len(pa))
+    pb += [0] * (n - len(pb))
+    return pa > pb
+
+
+def _update_asset():
+    """The release zip filename for the machine we're running on."""
+    if sys.platform == "darwin":
+        import platform as _pf
+        return ("DJCopyrightPrep_mac_intel.zip" if _pf.machine() == "x86_64"
+                else "DJCopyrightPrep_mac_apple-silicon.zip")
+    return "DJCopyrightPrep_windows.zip"
+
+
+@app.route("/check-update")
+def check_update():
+    """Ask GitHub for the latest release and report whether it is newer than us."""
+    info = {"update": False, "current": APP_VERSION}
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest",
+            headers={"Accept": "application/vnd.github+json",
+                     "User-Agent": "DJCopyrightPrep"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as r:
+            data = json.load(r)
+        latest = (data.get("tag_name") or "").lstrip("v")
+        if latest:
+            info.update({
+                "update": _version_gt(latest, APP_VERSION),
+                "latest": latest,
+                "changelog": data.get("body") or "",
+                "page": data.get("html_url") or "",
+                "download": f"https://github.com/{GITHUB_REPO}/releases/latest/download/{_update_asset()}",
+            })
+    except Exception as e:
+        info["error"] = str(e)
+    return jsonify(info)
+
+
+@app.route("/open-update", methods=["POST"])
+def open_update():
+    """Open an update link in the real browser. Restricted to our own release URLs."""
+    url = (request.json or {}).get("url", "")
+    if url.startswith(f"https://github.com/{GITHUB_REPO}/"):
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass
     return jsonify({"ok": True})
 
 
@@ -352,11 +420,45 @@ input:focus,select:focus{outline:none;border-color:var(--accent-dim)}
 .seg button.on{background:var(--accent-dim);color:#04211e;font-weight:600}
 .seg button+button{border-left:1px solid var(--border)}
 .seg button:hover{border-color:transparent}
+.brandrow{display:flex;align-items:baseline;gap:8px;margin-bottom:12px}
+.brandrow .brand{margin-bottom:0}
+.ver{font-size:12px;color:var(--text-dim)}
+.updbar{display:none;border:1px solid var(--accent-dim);background:rgba(30,215,96,.08);
+  border-radius:9px;padding:11px 13px;margin-bottom:16px}
+.updbar.show{display:block}
+.updhead{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.updhead .grow{flex:1}
+.updhead b{color:var(--accent)}
+button.mini{padding:5px 10px;font-size:12px}
+.changelog{display:none;margin-top:10px;padding-top:10px;border-top:1px solid var(--border);
+  font-size:12.5px;line-height:1.55;color:var(--text);max-height:200px;overflow:auto}
+.changelog.show{display:block}
+.changelog b{color:var(--text)}
+.updsteps{margin-top:10px;font-size:12px;color:var(--text-dim);line-height:1.5}
 .hidden{display:none}
 </style></head>
 <body>
 <div class="wrap"><div class="card">
-  <div class="brand">◐ DJ Copyright Prep</div>
+
+  <div class="updbar" id="updbar">
+    <div class="updhead">
+      <span>⬆ Update available: <b id="updver"></b></span>
+      <span class="grow"></span>
+      <button class="mini" onclick="toggleChangelog()">What's new</button>
+      <button class="primary mini" onclick="getUpdate()">Download</button>
+      <button class="mini ghost" onclick="dismissUpd()">✕</button>
+    </div>
+    <div class="changelog" id="changelog"></div>
+    <div class="updsteps" id="updsteps" style="display:none">
+      Your download is opening in the browser. When it finishes: unzip it, quit this app,
+      replace your old <b>DJ Copyright Prep</b> folder with the new one, then open it.
+    </div>
+  </div>
+
+  <div class="brandrow">
+    <div class="brand">◐ DJ Copyright Prep</div>
+    <span class="ver">v__VERSION__</span>
+  </div>
   <div class="howto">
     <div class="howto-title">How to use</div>
     <ol>
@@ -416,7 +518,38 @@ input:focus,select:focus{outline:none;border-color:var(--accent-dim)}
 </div></div>
 
 <script>
-let folder = null, outPath = null, outputMode = 'video';
+let folder = null, outPath = null, outputMode = 'video', updInfo = null;
+
+// --- Update notice (Tier 1) ---
+function mdLite(s){
+  s = escapeHtml(s || '');
+  s = s.replace(/^#{1,6}\s*(.*)$/gm, '<b>$1</b>');     // headings -> bold
+  s = s.replace(/^\s*[-*]\s+(.*)$/gm, '• $1');          // bullets
+  s = s.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');         // **bold**
+  s = s.replace(/`([^`]+)`/g, '$1');                    // strip code ticks
+  return s.replace(/\n/g, '<br>');
+}
+async function checkUpdate(){
+  try{
+    const d = await (await fetch('/check-update')).json();
+    if(d.update){
+      updInfo = d;
+      document.getElementById('updver').textContent = 'v' + d.latest;
+      document.getElementById('changelog').innerHTML =
+        mdLite(d.changelog) || 'See the release page for details.';
+      document.getElementById('updbar').classList.add('show');
+    }
+  }catch(e){ /* offline or rate-limited: just skip the notice */ }
+}
+function toggleChangelog(){ document.getElementById('changelog').classList.toggle('show'); }
+async function getUpdate(){
+  if(!updInfo) return;
+  await fetch('/open-update', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({url: updInfo.download})});
+  document.getElementById('updsteps').style.display = 'block';
+  document.getElementById('changelog').classList.add('show');
+}
+function dismissUpd(){ document.getElementById('updbar').classList.remove('show'); }
 
 function toggleTrim(){
   document.getElementById('opts').classList.toggle('off', !document.getElementById('trim').checked);
@@ -509,6 +642,8 @@ function setStatus(s, err){ const el=document.getElementById('status');
   el.innerHTML = s; el.style.color = err ? 'var(--danger)' : 'var(--text-dim)'; }
 function escapeHtml(s){ return (s+'').replace(/[&<>"']/g, c =>
   ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+checkUpdate();
 </script>
 </body></html>"""
 
