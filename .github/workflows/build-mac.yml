@@ -1,10 +1,12 @@
 name: Build and release
 
-# On every push to main: builds Windows + both macOS apps and uploads them as
-# Actions artifacts (for quick testing).
-# On a version tag (e.g. v1.0.0): does the same, then publishes a GitHub Release with
-# all three zips attached - giving permanent public download links and per-file
-# download counts.
+# Push to main: builds the apps and uploads them as artifacts (for testing).
+# Tag v* : same, then publishes a GitHub Release with the zips attached (permanent
+#          public download links + per-file download counts).
+#
+# The release waits only on Windows + Apple Silicon, so the scarce Intel runners can
+# never block a release. The Intel app is best-effort and gets folded in whenever its
+# runner is available.
 
 on:
   push:
@@ -13,18 +15,9 @@ on:
   workflow_dispatch:
 
 jobs:
-  # ---------------------------------------------------------------- macOS (both archs)
-  build-mac:
-    name: build-mac-${{ matrix.arch }}
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: macos-13   # Intel (x86_64): runs on Intel + Apple Silicon (Rosetta)
-            arch: intel
-          - runner: macos-14   # Apple Silicon (arm64): native on M1/M2/M3/M4
-            arch: apple-silicon
+  build-mac-arm:
+    name: build-mac-apple-silicon
+    runs-on: macos-14            # Apple Silicon (arm64), allocates quickly
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -33,28 +26,43 @@ jobs:
       - name: Bundle a macOS ffmpeg
         run: |
           brew install ffmpeg
-          mkdir -p bin
-          cp "$(which ffmpeg)" bin/ffmpeg
-          chmod +x bin/ffmpeg
-      - name: Install build dependencies
-        run: pip install flask pywebview pyinstaller
-      - name: Build the app
+          mkdir -p bin && cp "$(which ffmpeg)" bin/ffmpeg && chmod +x bin/ffmpeg
+      - run: pip install flask pywebview pyinstaller
+      - name: Build
         run: |
-          pyinstaller --windowed --clean --noconfirm \
-            --name "DJ Copyright Prep" \
-            --icon icon.icns \
-            --add-data "bin:bin" \
-            --collect-all webview \
-            --exclude-module tkinter \
-            app.py
-      - name: Zip the app
-        run: cd dist && zip -q -r -y "DJCopyrightPrep_mac_${{ matrix.arch }}.zip" "DJ Copyright Prep.app"
+          pyinstaller --windowed --clean --noconfirm --name "DJ Copyright Prep" \
+            --icon icon.icns --add-data "bin:bin" --collect-all webview \
+            --exclude-module tkinter app.py
+      - run: cd dist && zip -q -r -y "DJCopyrightPrep_mac_apple-silicon.zip" "DJ Copyright Prep.app"
       - uses: actions/upload-artifact@v4
         with:
-          name: DJCopyrightPrep_mac_${{ matrix.arch }}
-          path: dist/DJCopyrightPrep_mac_${{ matrix.arch }}.zip
+          name: DJCopyrightPrep_mac_apple-silicon
+          path: dist/DJCopyrightPrep_mac_apple-silicon.zip
 
-  # -------------------------------------------------------------------------- Windows
+  build-mac-intel:
+    name: build-mac-intel
+    runs-on: macos-13            # Intel (x86_64); runners can be slow to allocate
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Bundle a macOS ffmpeg
+        run: |
+          brew install ffmpeg
+          mkdir -p bin && cp "$(which ffmpeg)" bin/ffmpeg && chmod +x bin/ffmpeg
+      - run: pip install flask pywebview pyinstaller
+      - name: Build
+        run: |
+          pyinstaller --windowed --clean --noconfirm --name "DJ Copyright Prep" \
+            --icon icon.icns --add-data "bin:bin" --collect-all webview \
+            --exclude-module tkinter app.py
+      - run: cd dist && zip -q -r -y "DJCopyrightPrep_mac_intel.zip" "DJ Copyright Prep.app"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DJCopyrightPrep_mac_intel
+          path: dist/DJCopyrightPrep_mac_intel.zip
+
   build-windows:
     name: build-windows
     runs-on: windows-latest
@@ -76,11 +84,10 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path redist | Out-Null
           Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/p/?LinkId=2124703" -OutFile redist/MicrosoftEdgeWebview2Setup.exe
-      - name: Install build dependencies
-        run: pip install flask pywebview pyinstaller
-      - name: Build the app
+      - run: pip install flask pywebview pyinstaller
+      - name: Build
         run: pyinstaller --onedir --noconsole --clean --noconfirm --name DJCopyrightPrep --icon icon.ico --add-data "bin;bin" --add-data "redist;redist" --collect-all webview --collect-all pythonnet --collect-all clr_loader --copy-metadata pythonnet --exclude-module tkinter app.py
-      - name: Zip the app
+      - name: Zip
         shell: pwsh
         run: Compress-Archive -Path "dist/DJCopyrightPrep" -DestinationPath "dist/DJCopyrightPrep_windows.zip"
       - uses: actions/upload-artifact@v4
@@ -88,10 +95,9 @@ jobs:
           name: DJCopyrightPrep_windows
           path: dist/DJCopyrightPrep_windows.zip
 
-  # ----------------------------------------------------- Publish a Release (tags only)
   release:
     name: publish-release
-    needs: [build-mac, build-windows]
+    needs: [build-mac-arm, build-windows]   # NOT build-mac-intel, so Intel can't block
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
