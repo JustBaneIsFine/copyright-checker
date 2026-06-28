@@ -1,47 +1,43 @@
-name: Build macOS apps
+name: Build and release
 
-# Builds BOTH macOS variants on every push (and on-demand), each as its own download:
-#   * Intel (x86_64)        -> runs on Intel Macs natively AND Apple Silicon via Rosetta
-#   * Apple Silicon (arm64) -> native on M1/M2/M3/M4 Macs (faster there)
-# Grab whichever matches your tester from the run's Artifacts section.
+# On every push to main: builds Windows + both macOS apps and uploads them as
+# Actions artifacts (for quick testing).
+# On a version tag (e.g. v1.0.0): does the same, then publishes a GitHub Release with
+# all three zips attached - giving permanent public download links and per-file
+# download counts.
 
 on:
-  workflow_dispatch:
   push:
     branches: [ main ]
+    tags: [ 'v*' ]
+  workflow_dispatch:
 
 jobs:
+  # ---------------------------------------------------------------- macOS (both archs)
   build-mac:
-    name: build-${{ matrix.arch }}
+    name: build-mac-${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     strategy:
-      fail-fast: false   # if the Intel runner queue is slow, don't hold up Apple Silicon
+      fail-fast: false
       matrix:
         include:
-          - runner: macos-13   # Intel (x86_64)
+          - runner: macos-13   # Intel (x86_64): runs on Intel + Apple Silicon (Rosetta)
             arch: intel
-          - runner: macos-14   # Apple Silicon (arm64)
+          - runner: macos-14   # Apple Silicon (arm64): native on M1/M2/M3/M4
             arch: apple-silicon
-
     steps:
-      - name: Check out the code
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-
-      - name: Bundle a macOS ffmpeg (matches the runner's architecture)
+      - name: Bundle a macOS ffmpeg
         run: |
           brew install ffmpeg
           mkdir -p bin
           cp "$(which ffmpeg)" bin/ffmpeg
           chmod +x bin/ffmpeg
-
       - name: Install build dependencies
         run: pip install flask pywebview pyinstaller
-
       - name: Build the app
         run: |
           pyinstaller --windowed --clean --noconfirm \
@@ -51,14 +47,62 @@ jobs:
             --collect-all webview \
             --exclude-module tkinter \
             app.py
-
       - name: Zip the app
-        run: |
-          cd dist
-          zip -q -r -y "DJCopyrightPrep_mac_${{ matrix.arch }}.zip" "DJ Copyright Prep.app"
-
-      - name: Upload the macOS app
-        uses: actions/upload-artifact@v4
+        run: cd dist && zip -q -r -y "DJCopyrightPrep_mac_${{ matrix.arch }}.zip" "DJ Copyright Prep.app"
+      - uses: actions/upload-artifact@v4
         with:
           name: DJCopyrightPrep_mac_${{ matrix.arch }}
           path: dist/DJCopyrightPrep_mac_${{ matrix.arch }}.zip
+
+  # -------------------------------------------------------------------------- Windows
+  build-windows:
+    name: build-windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Fetch ffmpeg (essentials)
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile ff.zip
+          Expand-Archive ff.zip -DestinationPath fftmp -Force
+          New-Item -ItemType Directory -Force -Path bin | Out-Null
+          $exe = Get-ChildItem -Recurse fftmp -Filter ffmpeg.exe | Select-Object -First 1
+          Copy-Item $exe.FullName bin/ffmpeg.exe
+      - name: Fetch WebView2 bootstrapper
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path redist | Out-Null
+          Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/p/?LinkId=2124703" -OutFile redist/MicrosoftEdgeWebview2Setup.exe
+      - name: Install build dependencies
+        run: pip install flask pywebview pyinstaller
+      - name: Build the app
+        run: pyinstaller --onedir --noconsole --clean --noconfirm --name DJCopyrightPrep --icon icon.ico --add-data "bin;bin" --add-data "redist;redist" --collect-all webview --collect-all pythonnet --collect-all clr_loader --copy-metadata pythonnet --exclude-module tkinter app.py
+      - name: Zip the app
+        shell: pwsh
+        run: Compress-Archive -Path "dist/DJCopyrightPrep" -DestinationPath "dist/DJCopyrightPrep_windows.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DJCopyrightPrep_windows
+          path: dist/DJCopyrightPrep_windows.zip
+
+  # ----------------------------------------------------- Publish a Release (tags only)
+  release:
+    name: publish-release
+    needs: [build-mac, build-windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Collect all built zips
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*.zip
+          generate_release_notes: true
