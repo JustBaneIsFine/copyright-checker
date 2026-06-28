@@ -18,6 +18,7 @@ import time
 import socket
 import shutil
 import logging
+import tempfile
 import threading
 import subprocess
 import webbrowser
@@ -52,12 +53,19 @@ app = Flask(__name__)
 # Keep the embedded server quiet - there is no console to print to in the shipped app.
 logging.getLogger("werkzeug").setLevel(logging.ERROR)
 
-# Set once the native window exists; lets the /pick-folder route use the OS-native dialog.
+# Set once the native window exists; lets the batch routes use the OS-native dialogs.
 WINDOW = None
+
+# The current batch of tracks to combine: a list of absolute file paths (some are real
+# source files from the picker, some are dropped files we staged to a temp dir).
+BATCH = []
+STAGING = None          # temp dir holding dropped files
+OUT_DIR = None          # where to write the result (a picked folder, else the Desktop)
+OUT_BASE = ""           # optional prefix for the output file (e.g. a folder's name)
 
 # Bumped each release to match the GitHub tag (e.g. tag v1.2.0 -> APP_VERSION "1.2.0").
 # The app compares this to the latest release to offer an in-app update notice.
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 GITHUB_REPO = "JustBaneIsFine/copyright-checker"
 
 # Hide the console windows ffmpeg/ffprobe would otherwise pop up on Windows.
@@ -124,31 +132,88 @@ def list_audio(folder):
     return names
 
 
+def is_audio(name):
+    return os.path.splitext(name)[1].lower() in AUDIO_EXTS
+
+
+def _desktop_dir():
+    d = os.path.join(os.path.expanduser("~"), "Desktop")
+    return d if os.path.isdir(d) else os.path.expanduser("~")
+
+
+def _ensure_staging():
+    global STAGING
+    if STAGING is None or not os.path.isdir(STAGING):
+        STAGING = tempfile.mkdtemp(prefix="djprep_drop_")
+    return STAGING
+
+
+def _batch_payload():
+    return {"files": [os.path.basename(p) for p in BATCH], "count": len(BATCH)}
+
+
+def _open_folder_dialog():
+    try:
+        if WINDOW is not None:
+            import webview
+            mode = getattr(getattr(webview, "FileDialog", None), "FOLDER",
+                           getattr(webview, "FOLDER_DIALOG", 2))
+            res = WINDOW.create_file_dialog(mode)
+            return res[0] if res else None
+        import tkinter as tk
+        from tkinter import filedialog
+        root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
+        f = filedialog.askdirectory(title="Choose a song folder"); root.destroy()
+        return f or None
+    except Exception:
+        return None
+
+
+def _open_files_dialog():
+    try:
+        if WINDOW is not None:
+            import webview
+            mode = getattr(getattr(webview, "FileDialog", None), "OPEN",
+                           getattr(webview, "OPEN_DIALOG", 10))
+            res = WINDOW.create_file_dialog(
+                mode, allow_multiple=True,
+                file_types=("Audio (*.mp3;*.wav;*.flac;*.m4a;*.aac;*.ogg;*.wma;*.aiff;*.aif)",
+                            "All files (*.*)"))
+            return list(res) if res else []
+        import tkinter as tk
+        from tkinter import filedialog
+        root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
+        fs = filedialog.askopenfilenames(title="Choose songs"); root.destroy()
+        return list(fs)
+    except Exception:
+        return []
+
+
 # --------------------------------------------------------------------------------------
 # Core pipeline - generator that yields progress dicts (consumed by the SSE route)
 # --------------------------------------------------------------------------------------
-def process(folder, trim, offset, length, bitrate, color, audio_only=False):
-    files = list_audio(folder)
+def process(files, out_dir, out_base, trim, offset, length, bitrate, color, audio_only=False):
     if not files:
-        yield {"error": "No audio files found in that folder."}
+        yield {"error": "No songs added yet. Drag tracks or a folder onto the window."}
         return
 
-    work = Path(folder) / "_djprep_tmp"
-    if work.exists():
-        shutil.rmtree(work, ignore_errors=True)
-    work.mkdir(parents=True, exist_ok=True)
+    work = Path(tempfile.mkdtemp(prefix="djprep_work_"))
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+    except OSError:
+        pass
 
     # Audio-only is delivered as uncompressed WAV; video keeps the small AAC track.
     ext = ".wav" if audio_only else ".mp4"
     seg_ext = ".wav" if audio_only else ".m4a"
-    out_name = (Path(folder).name or "songs") + "_copyright" + ext
-    out_path = str(Path(folder) / out_name)
+    out_name = ((out_base + "_") if out_base else "") + "copyright" + ext
+    out_path = str(Path(out_dir) / out_name)
 
     try:
         segments = []
         total = len(files)
-        for i, name in enumerate(files):
-            src = os.path.join(folder, name)
+        for i, src in enumerate(files):
+            name = os.path.basename(src)
             seg = str(work / f"seg_{i:04d}{seg_ext}")
 
             cmd = [FFMPEG, "-y", "-hide_banner", "-loglevel", "error"]
@@ -231,40 +296,106 @@ def index():
     return Response(PAGE.replace("__VERSION__", APP_VERSION), mimetype="text/html")
 
 
-@app.route("/pick-folder", methods=["POST"])
-def pick_folder():
-    """Open a native folder picker. Uses the pywebview window's own dialog when running
-    as the desktop app (pywebview marshals it to the GUI thread for us); falls back to a
-    tkinter dialog when running in a plain browser for development."""
-    folder = None
-    try:
-        if WINDOW is not None:
-            import webview
-            # FileDialog.FOLDER on newer pywebview; FOLDER_DIALOG on older.
-            folder_mode = getattr(getattr(webview, "FileDialog", None), "FOLDER",
-                                  getattr(webview, "FOLDER_DIALOG", 2))
-            result = WINDOW.create_file_dialog(folder_mode)
-            folder = result[0] if result else None
-        else:
-            import tkinter as tk
-            from tkinter import filedialog
-            root = tk.Tk()
-            root.withdraw()
-            root.attributes("-topmost", True)
-            folder = filedialog.askdirectory(title="Choose your song folder")
-            root.destroy()
-    except Exception as e:
-        return jsonify({"error": f"Could not open folder picker: {e}"}), 500
+# ----- Batch: build a list of tracks via the picker or drag-and-drop ------------------
+@app.route("/batch")
+def batch_get():
+    return jsonify(_batch_payload())
 
+
+@app.route("/batch/add-folder", methods=["POST"])
+def batch_add_folder():
+    folder = _open_folder_dialog()
     if not folder:
-        return jsonify({"cancelled": True})
-    files = list_audio(folder)
-    return jsonify({"path": folder, "files": files, "count": len(files)})
+        return jsonify({"cancelled": True, **_batch_payload()})
+    global OUT_DIR, OUT_BASE
+    was_empty = not BATCH
+    added = 0
+    for n in list_audio(folder):
+        p = os.path.join(folder, n)
+        if p not in BATCH:
+            BATCH.append(p)
+            added += 1
+    # If this folder is the whole batch, write the result next to it and name it after it.
+    if was_empty and added == len(BATCH):
+        OUT_DIR = folder
+        OUT_BASE = os.path.basename(os.path.normpath(folder)) or ""
+    else:
+        OUT_DIR = OUT_DIR or _desktop_dir()
+    return jsonify({"added": added, **_batch_payload()})
+
+
+@app.route("/batch/add-files", methods=["POST"])
+def batch_add_files():
+    global OUT_DIR
+    added = 0
+    for p in _open_files_dialog():
+        if is_audio(p) and p not in BATCH:
+            BATCH.append(p)
+            added += 1
+    if OUT_DIR is None:
+        OUT_DIR = _desktop_dir()
+    return jsonify({"added": added, **_batch_payload()})
+
+
+@app.route("/batch/add-file", methods=["POST"])
+def batch_add_file():
+    """A dropped file, uploaded as multipart (the WebView hides the real path)."""
+    global OUT_DIR
+    f = request.files.get("file")
+    if f and is_audio(f.filename or ""):
+        staging = _ensure_staging()
+        name = os.path.basename((f.filename or "track").replace("\\", "/"))
+        dest = os.path.join(staging, name)
+        base, ext = os.path.splitext(name)
+        k = 1
+        while os.path.exists(dest):
+            dest = os.path.join(staging, f"{base}_{k}{ext}")
+            k += 1
+        f.save(dest)
+        BATCH.append(dest)
+        if OUT_DIR is None:
+            OUT_DIR = _desktop_dir()
+    return jsonify(_batch_payload())
+
+
+@app.route("/batch/base", methods=["POST"])
+def batch_base():
+    """Optional: name the output after a dropped folder, if we don't have one yet."""
+    global OUT_BASE
+    name = (request.json or {}).get("name", "")
+    name = re.sub(r"[^\w\- ]+", "", name).strip()[:60]
+    if name and not OUT_BASE:
+        OUT_BASE = name
+    return jsonify({"ok": True})
+
+
+@app.route("/batch/remove", methods=["POST"])
+def batch_remove():
+    i = (request.json or {}).get("index", -1)
+    if isinstance(i, int) and 0 <= i < len(BATCH):
+        p = BATCH.pop(i)
+        if STAGING and os.path.abspath(p).startswith(os.path.abspath(STAGING)):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+    return jsonify(_batch_payload())
+
+
+@app.route("/batch/clear", methods=["POST"])
+def batch_clear():
+    global BATCH, STAGING, OUT_DIR, OUT_BASE
+    BATCH = []
+    if STAGING and os.path.isdir(STAGING):
+        shutil.rmtree(STAGING, ignore_errors=True)
+    STAGING = None
+    OUT_DIR = None
+    OUT_BASE = ""
+    return jsonify(_batch_payload())
 
 
 @app.route("/process")
 def process_route():
-    folder = request.args.get("path", "")
     trim = request.args.get("trim", "false") == "true"
     offset = float(request.args.get("offset", 30))
     length = float(request.args.get("length", 20))
@@ -272,12 +403,13 @@ def process_route():
     color = "0x161619"  # fixed dark frame - colour never mattered for detection
     audio_only = request.args.get("audio_only", "false") == "true"
 
-    if not folder or not os.path.isdir(folder):
-        return Response("data: " + json.dumps({"error": "Folder not found."}) + "\n\n",
-                        mimetype="text/event-stream")
+    files = list(BATCH)
+    out_dir = OUT_DIR or _desktop_dir()
+    out_base = OUT_BASE
 
     def stream():
-        for evt in process(folder, trim, offset, length, bitrate, color, audio_only):
+        for evt in process(files, out_dir, out_base, trim, offset, length, bitrate,
+                           color, audio_only):
             yield "data: " + json.dumps(evt) + "\n\n"
 
     return Response(stream(), mimetype="text/event-stream")
@@ -387,15 +519,24 @@ input,select{font-family:inherit;font-size:13px;color:var(--text);background:var
 input:focus,select:focus{outline:none;border-color:var(--accent-dim)}
 .section{margin-top:15px;border-top:1px solid var(--border);padding-top:14px}
 .label{color:var(--text-dim);text-transform:uppercase;font-size:11px;letter-spacing:.6px;margin-bottom:9px}
-.folderbox{display:flex;align-items:center;gap:12px}
-.path{flex:1;min-width:0;font-size:12.5px;color:var(--text-dim);word-break:break-all}
-.count{color:var(--accent);font-weight:600}
-.files{margin-top:10px;max-height:150px;overflow:auto;border:1px solid var(--border);
-  border-radius:8px;padding:6px;display:none}
+.drop{border:1.5px dashed var(--border);border-radius:10px;padding:18px;text-align:center;
+  transition:border-color .15s, background .15s}
+.drop-hint{color:var(--text-dim);font-size:13px;margin-bottom:10px}
+.drop-btns{display:flex;gap:8px;justify-content:center}
+body.dragging .drop{border-color:var(--accent);background:rgba(30,215,96,.07)}
+body.dragging .drop-hint{color:var(--accent)}
+.batchhead{display:none;align-items:center;margin-top:12px;font-size:12.5px;color:var(--text-dim)}
+.batchhead.show{display:flex}
+.batchhead b{color:var(--accent)}
+.files{margin-top:8px;max-height:170px;overflow:auto;border:1px solid var(--border);
+  border-radius:8px;padding:5px;display:none}
 .files.show{display:block}
-.file{padding:4px 8px;font-size:12.5px;color:var(--text);border-radius:5px;
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.file{display:flex;align-items:center;gap:8px;padding:5px 8px;font-size:12.5px;
+  color:var(--text);border-radius:5px}
 .file:nth-child(odd){background:var(--bg-elev2)}
+.file .fn{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.file .rm{cursor:pointer;color:var(--text-dim);padding:0 4px;flex:none}
+.file .rm:hover{color:var(--danger)}
 .row{display:flex;align-items:center;gap:10px;margin-bottom:10px}
 .row label{flex:1;color:var(--text)}
 .row .num{width:90px}
@@ -469,11 +610,20 @@ button.mini{padding:5px 10px;font-size:12px}
   </div>
 
   <div class="section" style="border-top:none;padding-top:0;margin-top:0">
-    <div class="label">1 · Song folder</div>
-    <div class="folderbox">
-      <button id="pick" onclick="pick()">📁 Choose folder</button>
-      <div class="path" id="path">No folder selected</div>
+    <div class="label">1 · Songs</div>
+    <div class="drop" id="drop">
+      <div class="drop-hint">Drag tracks or folders here</div>
+      <div class="drop-btns">
+        <button class="mini" onclick="addFolder()">📁 Add folder</button>
+        <button class="mini" onclick="addFiles()">🎵 Add files</button>
+      </div>
     </div>
+    <div class="batchhead" id="batchhead">
+      <span><b id="batchcount">0</b> <span id="batchword">tracks</span> in this batch</span>
+      <span class="grow"></span>
+      <button class="mini ghost" onclick="clearBatch()">Clear all</button>
+    </div>
+    <div class="status" id="batchstatus"></div>
     <div class="files" id="files"></div>
   </div>
 
@@ -517,7 +667,7 @@ button.mini{padding:5px 10px;font-size:12px}
 </div></div>
 
 <script>
-let folder = null, outPath = null, outputMode = 'video', updInfo = null;
+let outPath = null, outputMode = 'video', updInfo = null, batchCount = 0;
 
 // --- Update notice (Tier 1) ---
 function mdLite(s){
@@ -560,38 +710,102 @@ function setMode(m){
   document.getElementById('go').textContent = (m==='audio') ? 'Generate audio file' : 'Generate video';
 }
 
-async function pick(){
-  const btn = document.getElementById('pick');
-  btn.disabled = true; btn.textContent = 'Opening…';
-  try{
-    const d = await (await fetch('/pick-folder', {method:'POST'})).json();
-    if(d.cancelled){ return; }
-    if(d.error){ setStatus(d.error, true); return; }
-    folder = d.path;
-    document.getElementById('path').innerHTML =
-      d.path + ' · <span class="count">' + d.count + ' song' + (d.count==1?'':'s') + '</span>';
-    const fl = document.getElementById('files');
-    fl.innerHTML = d.files.map(f => '<div class="file">'+escapeHtml(f)+'</div>').join('');
-    fl.classList.toggle('show', d.count>0);
-    document.getElementById('go').disabled = d.count===0;
-    if(d.count===0) setStatus('No audio files in that folder.', true); else setStatus('');
-  } finally {
-    btn.disabled = false; btn.textContent = '📁 Choose folder';
-  }
+// --- Batch building (drag-drop + pickers) ---
+function renderBatch(d){
+  batchCount = d.count;
+  const fl = document.getElementById('files');
+  fl.innerHTML = d.files.map((f,i) =>
+    '<div class="file"><span class="fn">'+escapeHtml(f)+'</span>'
+    + '<span class="rm" onclick="removeItem('+i+')" title="Remove">✕</span></div>').join('');
+  fl.classList.toggle('show', d.count>0);
+  document.getElementById('batchhead').classList.toggle('show', d.count>0);
+  document.getElementById('batchcount').textContent = d.count;
+  document.getElementById('batchword').textContent = d.count===1 ? 'track' : 'tracks';
+  document.getElementById('go').disabled = d.count===0;
+}
+async function refreshBatch(){ renderBatch(await (await fetch('/batch')).json()); }
+function setBatchStatus(s){ document.getElementById('batchstatus').textContent = s || ''; }
+
+async function addFolder(){
+  setBatchStatus('Opening…');
+  const d = await (await fetch('/batch/add-folder', {method:'POST'})).json();
+  setBatchStatus(d.added===0 && !d.cancelled ? 'No audio files in that folder.' : '');
+  renderBatch(d);
+}
+async function addFiles(){
+  setBatchStatus('Opening…');
+  const d = await (await fetch('/batch/add-files', {method:'POST'})).json();
+  setBatchStatus(''); renderBatch(d);
+}
+async function removeItem(i){
+  renderBatch(await (await fetch('/batch/remove', {method:'POST',
+    headers:{'Content-Type':'application/json'}, body: JSON.stringify({index:i})})).json());
+}
+async function clearBatch(){
+  renderBatch(await (await fetch('/batch/clear', {method:'POST'})).json());
 }
 
+// Drag-and-drop: the WebView hides real paths, so we read the dropped files (walking into
+// any dropped folders) and upload their bytes to the local server.
+function isAudioName(n){ return /\.(mp3|wav|flac|m4a|aac|ogg|wma|aiff|aif)$/i.test(n); }
+function readEntries(reader){
+  return new Promise((resolve) => {
+    const all = [];
+    const step = () => reader.readEntries(
+      ents => { if(!ents.length) resolve(all); else { all.push(...ents); step(); } },
+      () => resolve(all));
+    step();
+  });
+}
+async function collectFiles(entry, out){
+  if(entry.isFile){
+    if(isAudioName(entry.name)) out.push(await new Promise((r,j)=>entry.file(r,j)));
+  } else if(entry.isDirectory){
+    for(const e of await readEntries(entry.createReader())) await collectFiles(e, out);
+  }
+}
+async function uploadDrop(file){
+  const fd = new FormData(); fd.append('file', file, file.name);
+  await fetch('/batch/add-file', {method:'POST', body: fd});
+}
+async function handleDrop(e){
+  const items = e.dataTransfer.items, entries = [];
+  let folderName = '';
+  for(const it of items){
+    const en = it.webkitGetAsEntry && it.webkitGetAsEntry();
+    if(en){ entries.push(en); if(en.isDirectory && !folderName) folderName = en.name; }
+  }
+  setBatchStatus('Reading dropped items…');
+  const files = [];
+  if(entries.length){ for(const en of entries) await collectFiles(en, files); }
+  else if(e.dataTransfer.files){ for(const f of e.dataTransfer.files) if(isAudioName(f.name)) files.push(f); }
+  if(!files.length){ setBatchStatus('No audio files in what you dropped.'); return; }
+  if(folderName) fetch('/batch/base', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({name: folderName})});
+  let n = 0;
+  for(const f of files){ n++; setBatchStatus('Adding ' + n + ' / ' + files.length + '…'); await uploadDrop(f); }
+  setBatchStatus(''); await refreshBatch();
+}
+let dragDepth = 0;
+window.addEventListener('dragover', e => e.preventDefault());
+window.addEventListener('dragenter', e => { e.preventDefault(); dragDepth++; document.body.classList.add('dragging'); });
+window.addEventListener('dragleave', e => { if(--dragDepth<=0){ dragDepth=0; document.body.classList.remove('dragging'); } });
+window.addEventListener('drop', async e => {
+  e.preventDefault(); dragDepth=0; document.body.classList.remove('dragging');
+  await handleDrop(e);
+});
+
 function go(){
-  if(!folder) return;
+  if(batchCount===0) return;
   const trim = document.getElementById('trim').checked;
   const q = new URLSearchParams({
-    path: folder, trim: trim,
+    trim: trim,
     offset: document.getElementById('offset').value || 30,
     length: document.getElementById('length').value || 20,
     bitrate: document.getElementById('bitrate').value,
     audio_only: (outputMode === 'audio'),
   });
   document.getElementById('go').disabled = true;
-  document.getElementById('pick').disabled = true;
   document.getElementById('result').classList.remove('show','err');
   document.getElementById('progwrap').classList.remove('hidden');
   setBar(0); setStatus('Starting…');
@@ -623,8 +837,7 @@ function go(){
 
 function finish(msg, isErr){
   setBar(100);
-  document.getElementById('go').disabled = false;
-  document.getElementById('pick').disabled = false;
+  document.getElementById('go').disabled = (batchCount===0);
   const res = document.getElementById('result');
   res.classList.add('show'); res.classList.toggle('err', isErr);
   document.getElementById('resmsg').innerHTML = msg;
@@ -643,6 +856,7 @@ function escapeHtml(s){ return (s+'').replace(/[&<>"']/g, c =>
   ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
 checkUpdate();
+refreshBatch();
 </script>
 </body></html>"""
 

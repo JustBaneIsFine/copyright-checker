@@ -1,7 +1,8 @@
-## Version 1.2.0
+## Version 1.3.0
 
 New
-- Added support for AIFF (.aiff / .aif) audio files.
-- The app checks for updates when it opens and shows what's new, with a one-click download, so you no longer have to re-download by hand to find out if there is a newer version.
+- Drag and drop. Drop tracks or whole folders straight onto the window and they all get combined into one batch. Drop a folder or two at once, or add songs one at a time.
+- New "Add folder" and "Add files" buttons if you prefer the file picker.
+- See the batch as a list, remove individual tracks, or clear it and start over.
 
-When an update is available you will see a bar at the top: click "What's new" to read the changes, then "Download" to get it.
+The combined file is saved to your Desktop (or next to a folder you picked), and you can open its location from the app when it's done.

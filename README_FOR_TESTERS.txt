@@ -19,8 +19,8 @@ How to run (Windows)
      first time (needs an internet connection for that one-time step).
 
 3. In the window:
-   - Click "Choose folder" and select a folder containing your songs
-     (.mp3 .wav .flac .m4a .aac .ogg .aiff).
+   - Drag tracks or folders onto the window to build a batch (or use the
+     "Add folder" / "Add files" buttons). Supported: .mp3 .wav .flac .m4a .aac .ogg .aiff.
    - Pick options:
        * Output:  "Video + Audio"  -> a tiny .mp4 (upload this to YouTube)
                   "Audio only"      -> just the combined .wav audio file
