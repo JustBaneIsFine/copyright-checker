@@ -198,26 +198,6 @@ def _open_folder_dialog():
         return None
 
 
-def _open_files_dialog():
-    try:
-        if WINDOW is not None:
-            import webview
-            mode = getattr(getattr(webview, "FileDialog", None), "OPEN",
-                           getattr(webview, "OPEN_DIALOG", 10))
-            res = WINDOW.create_file_dialog(
-                mode, allow_multiple=True,
-                file_types=("Audio (*.mp3;*.wav;*.flac;*.m4a;*.aac;*.ogg;*.wma;*.aiff;*.aif)",
-                            "All files (*.*)"))
-            return list(res) if res else []
-        import tkinter as tk
-        from tkinter import filedialog
-        root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
-        fs = filedialog.askopenfilenames(title="Choose songs"); root.destroy()
-        return list(fs)
-    except Exception:
-        return []
-
-
 # --------------------------------------------------------------------------------------
 # Core pipeline - generator that yields progress dicts (consumed by the SSE route)
 # --------------------------------------------------------------------------------------
@@ -350,22 +330,6 @@ def batch_add_folder():
         OUT_BASE = os.path.basename(os.path.normpath(folder)) or ""
     else:
         OUT_DIR = OUT_DIR or _desktop_dir()
-    return jsonify({"added": added, "skipped": skipped, **_batch_payload()})
-
-
-@app.route("/batch/add-files", methods=["POST"])
-def batch_add_files():
-    global OUT_DIR
-    added = skipped = 0
-    for p in _open_files_dialog():
-        if not is_audio(p):
-            continue
-        if _add_path(p):
-            added += 1
-        else:
-            skipped += 1
-    if OUT_DIR is None:
-        OUT_DIR = _desktop_dir()
     return jsonify({"added": added, "skipped": skipped, **_batch_payload()})
 
 
@@ -672,7 +636,6 @@ button.mini{padding:5px 10px;font-size:12px}
       <div class="drop-hint">Drag tracks or folders here</div>
       <div class="drop-btns">
         <button class="mini" onclick="addFolder()">📁 Add folder</button>
-        <button class="mini" onclick="addFiles()">🎵 Add files</button>
       </div>
     </div>
     <div class="batchhead" id="batchhead">
@@ -810,14 +773,6 @@ async function addFolder(){
   setBatchStatus(d.cancelled ? '' :
     (d.added===0 && d.skipped===0 ? 'No audio files in that folder.'
      : 'Added ' + d.added + (d.skipped?(', skipped ' + d.skipped + ' duplicate' + (d.skipped>1?'s':'')):'') + '.'));
-}
-async function addFiles(){
-  if(isBusy()) return;
-  setBatchStatus('Opening…');
-  const d = await (await fetch('/batch/add-files', {method:'POST'})).json();
-  renderBatch(d);
-  setBatchStatus(d.added===0 && d.skipped===0 ? '' :
-    'Added ' + d.added + (d.skipped?(', skipped ' + d.skipped + ' duplicate' + (d.skipped>1?'s':'')):'') + '.');
 }
 async function removeItem(i){
   if(isBusy()) return;
